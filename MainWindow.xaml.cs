@@ -25,7 +25,7 @@ namespace BetterHI3Launcher
 		public static readonly string miHoYoPath = Path.Combine(App.LocalLowPath, "miHoYo");
 		public static string GameInstallPath, GameCachePath, GameRegistryPath, GameArchivePath, GameArchiveTempPath, GameExePath;
 		public static string RegistryVersionInfo;
-		public static string GameWebProfileURL, GameFullName, GameArchiveName, GameExeName, GameInstallRegistryName;
+		public static string GameWebProfileURL, GameFullName, GameArchiveName, GameExeName, GameInstallRegistryName, GameHYPName;
 		public static bool DownloadPaused, PatchDownload, PreloadDownload, BackgroundImageDownloading, LegacyBoxActive, ActionAbort;
 		public static int PatchDownloadInt;
 		public static RoutedCommand DownloadCacheCommand = new RoutedCommand();
@@ -47,6 +47,7 @@ namespace BetterHI3Launcher
 		Http httpclient;
 		HttpProp httpprop;
 		CancellationTokenSource token;
+		Task httptask;
 		DownloadProgressTracker tracker = new DownloadProgressTracker(50, TimeSpan.FromMilliseconds(500));
 
 		internal LauncherStatus Status
@@ -193,36 +194,42 @@ namespace BetterHI3Launcher
 						RegistryVersionInfo = "VersionInfoGlobal";
 						GameFullName = "Honkai Impact 3rd";
 						GameInstallRegistryName = GameFullName;
+						GameHYPName = "bh3_global";
 						GameWebProfileURL = "https://account.hoyoverse.com";
 						break;
 					case HI3Server.SEA:
 						RegistryVersionInfo = "VersionInfoSEA";
 						GameFullName = "Honkai Impact 3";
 						GameInstallRegistryName = GameFullName;
+						GameHYPName = "bh3_os";
 						GameWebProfileURL = "https://account.hoyoverse.com";
 						break;
 					case HI3Server.CN:
 						RegistryVersionInfo = "VersionInfoCN";
 						GameFullName = "崩坏3";
 						GameInstallRegistryName = GameFullName;
+						GameHYPName = "bh3_cn";
 						GameWebProfileURL = "https://user.mihoyo.com";
 						break;
 					case HI3Server.TW:
 						RegistryVersionInfo = "VersionInfoTW";
 						GameFullName = "崩壊3rd";
 						GameInstallRegistryName = "崩壞3rd";
+						GameHYPName = "bh3_tw";
 						GameWebProfileURL = "https://account.hoyoverse.com";
 						break;
 					case HI3Server.KR:
 						RegistryVersionInfo = "VersionInfoKR";
 						GameFullName = "붕괴3rd";
 						GameInstallRegistryName = GameFullName;
+						GameHYPName = "bh3_kr";
 						GameWebProfileURL = "https://account.hoyoverse.com";
 						break;
 					case HI3Server.JP:
 						RegistryVersionInfo = "VersionInfoJP";
 						GameFullName = "崩壊3rd";
 						GameInstallRegistryName = GameFullName;
+						GameHYPName = "bh3_jp";
 						GameWebProfileURL = "https://account.hoyoverse.com";
 						break;
 				}
@@ -866,6 +873,32 @@ namespace BetterHI3Launcher
 			WindowState = WindowState.Minimized;
 		}
 
+		private async Task AssignAndRunHttpTaskOrThrow(Task task)
+		{
+			httptask = task;
+			if (task.Exception != null)
+				throw task.Exception;
+
+			await task;
+
+			if (task.Exception != null)
+				throw task.Exception;
+		}
+
+		private async Task WaitUntilTaskIsCompleted(Task task, double refreshInterval = 0.25)
+		{
+			// Run loop
+			while (true)
+			{
+				// If a task is not in running state, then return
+				if (task.IsCompleted || task.IsCanceled || task.IsFaulted)
+					return;
+
+				// Otherwise, continue to loop and wait the delay for the interval defined
+				await Task.Delay(TimeSpan.FromSeconds(refreshInterval));
+			}
+		}
+
 		private async void LaunchButton_Click(object sender, RoutedEventArgs e)
 		{
 			if(LegacyBoxActive)
@@ -967,20 +1000,36 @@ namespace BetterHI3Launcher
 					{
 						try
 						{
-							var possible_paths = new List<string>();
-							possible_paths.Add(App.LauncherRootPath);
-							possible_paths.Add(Environment.ExpandEnvironmentVariables("%ProgramW6432%"));
+							var possible_paths = new List<string>
+							{
+								App.LauncherRootPath,
+								Environment.ExpandEnvironmentVariables("%ProgramW6432%")
+							};
 							string[] game_reg_names = {"Honkai Impact 3rd", "Honkai Impact 3", "崩坏3", "崩壞3rd", "붕괴3rd", "崩壊3rd"};
 							foreach(string game_reg_name in game_reg_names)
 							{
 								try
 								{
-									var path = CheckForExistingGameDirectory(Registry.LocalMachine.OpenSubKey($@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{game_reg_name}").GetValue("InstallPath").ToString());
+									string path = CheckForExistingGameDirectory(Registry.LocalMachine.OpenSubKey($@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{game_reg_name}").GetValue("InstallPath").ToString());
 									if(!string.IsNullOrEmpty(path))
 									{
 										possible_paths.Add(path);
 									}
 								}catch{}
+							}
+							foreach(string hyp_version in Registry.CurrentUser.OpenSubKey(@"SOFTWARE\miHoYo\HYP").GetSubKeyNames())
+							{
+								foreach(string game_reg_name in Registry.CurrentUser.OpenSubKey($@"SOFTWARE\miHoYo\HYP\{hyp_version}").GetSubKeyNames())
+								{
+									try
+									{
+										string path = CheckForExistingGameDirectory(Registry.CurrentUser.OpenSubKey($@"SOFTWARE\miHoYo\HYP\{hyp_version}\{game_reg_name}").GetValue("GameInstallPath").ToString());
+										if(!string.IsNullOrEmpty(path))
+										{
+											possible_paths.Add(path);
+										}
+									}catch{}
+								}
 							}
 							foreach(string path in possible_paths)
 							{
@@ -1178,6 +1227,7 @@ namespace BetterHI3Launcher
 			if(!DownloadPaused)
 			{
 				token.Cancel();
+				await WaitUntilTaskIsCompleted(httptask);
 				Status = LauncherStatus.DownloadPaused;
 				DownloadProgressBarStackPanel.Visibility = Visibility.Visible;
 				DownloadETAText.Visibility = Visibility.Hidden;
@@ -1208,8 +1258,8 @@ namespace BetterHI3Launcher
 					{
 						token = new CancellationTokenSource();
 						httpclient.DownloadProgress += DownloadStatusChanged;
-						await httpclient.Download(httpprop.URL, httpprop.Out, httpprop.Thread, false, token.Token);
-						await httpclient.Merge(token.Token);
+						await AssignAndRunHttpTaskOrThrow(httpclient.Download(httpprop.URL, httpprop.Out, httpprop.Thread, false, token.Token));
+						await AssignAndRunHttpTaskOrThrow(httpclient.Merge(token.Token));
 						httpclient.DownloadProgress -= DownloadStatusChanged;
 						await DownloadGameFile();
 					}
@@ -1291,8 +1341,8 @@ namespace BetterHI3Launcher
 							httpprop = new HttpProp(url, tmp_path);
 							httpclient.DownloadProgress += PreloadDownloadStatusChanged;
 							PreloadPauseButton.IsEnabled = true;
-							await httpclient.Download(httpprop.URL, httpprop.Out, httpprop.Thread, false, token.Token);
-							await httpclient.Merge(token.Token);
+							await AssignAndRunHttpTaskOrThrow(httpclient.Download(httpprop.URL, httpprop.Out, httpprop.Thread, false, token.Token));
+							await AssignAndRunHttpTaskOrThrow(httpclient.Merge(token.Token));
 							httpclient.DownloadProgress -= PreloadDownloadStatusChanged;
 							Log("Downloaded pre-download archive");
 						}
@@ -1365,7 +1415,7 @@ namespace BetterHI3Launcher
 			WindowState = WindowState.Normal;
 		}
 
-		private void PreloadPauseButton_Click(object sender, RoutedEventArgs e)
+		private async void PreloadPauseButton_Click(object sender, RoutedEventArgs e)
 		{
 			if(LegacyBoxActive)
 			{
@@ -1376,6 +1426,7 @@ namespace BetterHI3Launcher
 			{
 				PreloadPauseButton.IsEnabled = false;
 				token.Cancel();
+				await WaitUntilTaskIsCompleted(httptask);
 				Log("Pre-download paused");
 				PreloadDownload = false;
 				PreloadPauseButton.IsEnabled = true;
